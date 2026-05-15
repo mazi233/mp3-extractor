@@ -31,9 +31,22 @@ async fn resolve_douyin_url(app: tauri::AppHandle, url: String) -> Result<String
 
     let client = build_client()?;
 
-    // Step 1: Visit the share page to get redirected and collect cookies.
-    // The redirect target URL contains the video ID.
-    let resp = client.get(&url)
+    // Rewrite /video/xxx URLs to jingxuan?modal_id=xxx format
+    // because /video/ page is an SPA shell without embedded video data
+    let request_url = if let Some(id) = extract_video_id(&url) {
+        if url.contains("/video/") {
+            let rewritten = format!("https://www.douyin.com/jingxuan?modal_id={id}");
+            emit_progress(&app, "resolve", "正在重写链接格式...");
+            rewritten
+        } else {
+            url.clone()
+        }
+    } else {
+        url.clone()
+    };
+
+    // Step 1: Visit the page to get redirected and collect cookies.
+    let resp = client.get(&request_url)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
         .send()
@@ -84,7 +97,16 @@ async fn resolve_douyin_url(app: tauri::AppHandle, url: String) -> Result<String
 
 /// Extract video ID from a Douyin URL.
 fn extract_video_id(url: &str) -> Option<String> {
-    // Pattern: /video/7361234567890123456
+    // Priority 1: modal_id= query parameter (most reliable)
+    if let Some(pos) = url.find("modal_id=") {
+        let after = &url[pos + 9..];
+        let id: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if id.len() >= 15 {
+            return Some(id);
+        }
+    }
+
+    // Priority 2: /video/xxx path segment
     if let Some(pos) = url.find("/video/") {
         let after = &url[pos + 7..];
         let id: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -256,6 +278,30 @@ fn urlencoding(s: &str) -> String {
 }
 
 /// Search JSON text for video CDN URLs.
+
+/// Check if a URL looks like a video URL (not a static resource like PNG/CSS/JS).
+fn is_video_url(url: &str) -> bool {
+    if !url.starts_with("http") {
+        return false;
+    }
+    // Reject static resources
+    for ext in &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js", ".ico"] {
+        if url.contains(ext) {
+            return false;
+        }
+    }
+    // Video indicators
+    if url.contains("video") || url.contains("mime_type=video") {
+        return true;
+    }
+    // Known video CDNs
+    for cdn in &["douyinvod.com", "ixigua.com", "bytecdn.cn", "bytedns.net", "pstatp.com"] {
+        if url.contains(cdn) {
+            return true;
+        }
+    }
+    false
+}
 fn find_video_url_in_json(json: &str) -> Option<String> {
     let url_keys = [
         "\"url_list\":[\"",
@@ -270,7 +316,7 @@ fn find_video_url_in_json(json: &str) -> Option<String> {
             let after_key = &json[pos + key.len()..];
             if let Some(end) = after_key.find('"') {
                 let url = unescape_json(&after_key[..end]);
-                if url.starts_with("http") {
+                if is_video_url(&url) {
                     return Some(url);
                 }
             }
@@ -286,7 +332,9 @@ fn find_video_url_in_json(json: &str) -> Option<String> {
                 .map(|i| pos + i)
                 .unwrap_or(json.len());
             let url = unescape_json(&json[start..end]);
-            return Some(url);
+            if is_video_url(&url) {
+                return Some(url);
+            }
         }
     }
 
@@ -473,6 +521,12 @@ async fn extract_audio(
     Ok(output_path)
 }
 
+#[tauri::command]
+fn copy_file(src: String, dst: String) -> Result<(), String> {
+    std::fs::copy(&src, &dst).map_err(|e| format!("复制文件失败: {e}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -482,7 +536,10 @@ pub fn run() {
             resolve_douyin_url,
             download_video,
             extract_audio,
+            copy_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
 }
+

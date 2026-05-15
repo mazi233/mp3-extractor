@@ -5,6 +5,10 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "dialog:default"
+    "opener:allow-open-url",
+    "opener:allow-open-path",
+    "dialog:default",
+    "dialog:allow-save",
+    "dialog:allow-open"
   ]
 }
