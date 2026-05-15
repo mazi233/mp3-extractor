@@ -364,7 +364,96 @@ async fn download_video(app: tauri::AppHandle, url: String) -> Result<String, St
     Ok(file_path.to_string_lossy().to_string())
 }
 
-/// Extract audio from video using ffmpeg (auto-downloaded).
+
+/// Map an arbitrary sample rate to the nearest value supported by LAME.
+fn clamp_sample_rate(rate: u32) -> u32 {
+    const VALID: &[u32] = &[8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000];
+    VALID
+        .iter()
+        .min_by_key(|&&v| (v as i64 - rate as i64).unsigned_abs())
+        .copied()
+        .unwrap_or(44100)
+}
+
+
+fn convert_audio(input: &str, output: &str) -> Result<(), String> {
+    let file = std::fs::File::open(input)
+        .map_err(|e| format!("打开视频文件失败: {e}"))?;
+
+    let file_size = file.metadata()
+        .map_err(|e| format!("读取文件信息失败: {e}"))?
+        .len();
+
+    // redlux: MP4 demuxing + HE-AAC decoding via fdk-aac (statically linked)
+    let decoder = redlux::Decoder::new_mpeg4(file, file_size)
+        .map_err(|e| format!("解析视频失败: {e}"))?;
+
+    let sample_rate = match decoder.sample_rate() {
+        0 => 44100,
+        r => clamp_sample_rate(r),
+    };
+    let channel_count = (decoder.channels() as usize).max(1).min(2);
+
+    // Build MP3 encoder (statically linked LAME)
+    let mut mp3_encoder = mp3lame_encoder::Builder::new()
+        .ok_or("创建 MP3 编码器失败")?
+        .with_sample_rate(sample_rate)
+        .map_err(|e| format!("设置采样率失败 (sample_rate={sample_rate}): {e}"))?
+        .with_num_channels(channel_count as u8)
+        .map_err(|e| format!("设置声道数失败: {e}"))?
+        .with_quality(mp3lame_encoder::Quality::Best)
+        .map_err(|e| format!("设置编码质量失败: {e}"))?
+        .build()
+        .map_err(|e| format!("初始化 MP3 编码器失败: {e}"))?;
+
+    let mut mp3_output: Vec<u8> = Vec::with_capacity(1024 * 1024);
+
+    // redlux iterates individual interleaved i16 samples
+    // Encode in 1152-sample-per-channel MP3 frames
+    const FRAME_SAMPLES: usize = 1152;
+    let chunk_size = FRAME_SAMPLES * channel_count;
+    let mut buf: Vec<i16> = Vec::with_capacity(chunk_size);
+
+    for sample in decoder {
+        buf.push(sample);
+        if buf.len() >= chunk_size {
+            let input = mp3lame_encoder::InterleavedPcm(&buf[..chunk_size]);
+            let needed = mp3lame_encoder::max_required_buffer_size(chunk_size);
+            mp3_output.reserve(needed);
+            let spare = mp3_output.spare_capacity_mut();
+            let written = mp3_encoder.encode(input, spare)
+                .map_err(|e| format!("MP3 编码失败: {e}"))?;
+            unsafe { mp3_output.set_len(mp3_output.len() + written); }
+            let rem = buf.split_off(chunk_size);
+            buf = rem;
+        }
+    }
+
+    // Encode final partial frame
+    if !buf.is_empty() {
+        let input = mp3lame_encoder::InterleavedPcm(&buf);
+        let needed = mp3lame_encoder::max_required_buffer_size(buf.len());
+        mp3_output.reserve(needed);
+        let spare = mp3_output.spare_capacity_mut();
+        let written = mp3_encoder.encode(input, spare)
+            .map_err(|e| format!("MP3 编码失败: {e}"))?;
+        unsafe { mp3_output.set_len(mp3_output.len() + written); }
+    }
+
+    // Flush
+    mp3_output.reserve(7200);
+    let spare = mp3_output.spare_capacity_mut();
+    let written = mp3_encoder.flush::<mp3lame_encoder::FlushNoGap>(spare)
+        .map_err(|e| format!("MP3 收尾失败: {e}"))?;
+    unsafe { mp3_output.set_len(mp3_output.len() + written); }
+
+    std::fs::write(output, &mp3_output)
+        .map_err(|e| format!("写入 MP3 文件失败: {e}"))?;
+
+    Ok(())
+}
+/// Extract audio track from video and encode to MP3.
+/// Uses redlux (fdk-aac, statically linked) + mp3lame-encoder (statically linked LAME).
 #[tauri::command]
 async fn extract_audio(
     app: tauri::AppHandle,
@@ -373,23 +462,11 @@ async fn extract_audio(
 ) -> Result<String, String> {
     emit_progress(&app, "convert", "正在提取音频...");
 
-    let exit_status = ffmpeg_sidecar::command::FfmpegCommand::new()
-        .args([
-            "-y",
-            "-i", &video_path,
-            "-vn",
-            "-acodec", "libmp3lame",
-            "-q:a", "2",
-            &output_path,
-        ])
-        .spawn()
-        .map_err(|e| format!("启动 ffmpeg 失败: {e}"))?
-        .wait()
-        .map_err(|e| format!("等待 ffmpeg 完成失败: {e}"))?;
-
-    if !exit_status.success() {
-        return Err("ffmpeg 转换失败".to_string());
-    }
+    // Run the CPU-intensive conversion in a blocking thread
+    let out = output_path.clone();
+    tokio::task::spawn_blocking(move || convert_audio(&video_path, &out))
+        .await
+        .map_err(|e| format!("音频转换线程异常: {e}"))??;
 
     emit_progress(&app, "done", "转换完成！");
 
