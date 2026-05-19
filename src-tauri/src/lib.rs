@@ -31,55 +31,52 @@ async fn resolve_douyin_url(app: tauri::AppHandle, url: String) -> Result<String
 
     let client = build_client()?;
 
-    // Rewrite /video/xxx URLs to jingxuan?modal_id=xxx format
-    // because /video/ page is an SPA shell without embedded video data
-    let request_url = if let Some(id) = extract_video_id(&url) {
-        if url.contains("/video/") {
-            let rewritten = format!("https://www.douyin.com/jingxuan?modal_id={id}");
-            emit_progress(&app, "resolve", "正在重写链接格式...");
-            rewritten
-        } else {
-            url.clone()
-        }
+    // Step 0: resolve short links (v.douyin.com → douyin.com/...)
+    let resolved_url = if url.contains("v.douyin.com") {
+        emit_progress(&app, "resolve", "正在解析短链接...");
+        let resp = client.head(&url)
+            .send().await
+            .map_err(|e| format!("短链接请求失败: {e}"))?;
+        resp.url().to_string()
     } else {
         url.clone()
     };
 
-    // Step 1: Visit the page to get redirected and collect cookies.
-    let resp = client.get(&request_url)
+    // Step 1: extract video ID and build canonical SSR URL
+    let video_id = extract_video_id(&resolved_url)
+        .ok_or_else(|| format!("无法从此链接提取视频 ID: {resolved_url}"))?;
+
+    let ssr_url = format!("https://www.douyin.com/jingxuan?modal_id={video_id}");
+    emit_progress(&app, "resolve", &format!("视频 ID: {video_id}"));
+
+    // Step 2: try the API first
+    if let Some(video_url) = call_aweme_api(&client, &video_id).await {
+        emit_progress(&app, "resolve", "通过 API 获取到视频地址");
+        return Ok(video_url);
+    }
+
+    if let Some(video_url) = call_aweme_api_v2(&client, &video_id).await {
+        emit_progress(&app, "resolve", "通过备用 API 获取到视频地址");
+        return Ok(video_url);
+    }
+
+    // Step 3: fetch SSR page and parse RENDER_DATA
+    emit_progress(&app, "resolve", "从页面提取视频地址...");
+    let resp = client.get(&ssr_url)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+        .header("Referer", "https://www.douyin.com/")
+        .send().await
+        .map_err(|e| format!("请求页面失败: {e}"))?;
 
-    let final_url = resp.url().to_string();
-    let body = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    let body = resp.text().await.map_err(|e| format!("读取页面失败: {e}"))?;
 
-    // Step 2: Try extracting video URL from the page's embedded RENDER_DATA
     if let Some(video_url) = extract_from_render_data(&body) {
         emit_progress(&app, "resolve", "从页面数据中提取到视频地址");
         return Ok(video_url);
     }
 
-    // Step 3: Extract video ID and call the internal API (with cookies from step 1)
-    if let Some(video_id) = extract_video_id(&final_url) {
-        emit_progress(&app, "resolve", &format!("找到视频 ID: {video_id}"));
-
-        // Try the primary API
-        if let Some(video_url) = call_aweme_api(&client, &video_id).await {
-            emit_progress(&app, "resolve", "通过 API 获取到视频地址");
-            return Ok(video_url);
-        }
-
-        // Try alternative API format
-        if let Some(video_url) = call_aweme_api_v2(&client, &video_id).await {
-            emit_progress(&app, "resolve", "通过备用 API 获取到视频地址");
-            return Ok(video_url);
-        }
-    }
-
-    // Step 4: Last resort — try parsing the page HTML for video elements
+    // Step 4: last resort — parse HTML
     if let Some(video_url) = extract_from_html(&body) {
         return Ok(video_url);
     }
@@ -91,7 +88,7 @@ async fn resolve_douyin_url(app: tauri::AppHandle, url: String) -> Result<String
          3. 抖音的反爬机制升级\n\n\
          请尝试：\n\
          - 确保链接是公开视频\n\
-         - 使用 douyin.com/video/xxxxx 格式的长链接"
+         - 复制完整分享文本粘贴到输入框"
     ))
 }
 
@@ -304,6 +301,10 @@ fn is_video_url(url: &str) -> bool {
 }
 fn find_video_url_in_json(json: &str) -> Option<String> {
     let url_keys = [
+        // Primary: playAddr[].src (matches bitRateList[].playAddr and video.playAddr)
+        "\"playAddr\":[{\"src\":\"",
+        "\"playAddr\":[{\"Src\":\"",
+        // Older API patterns (RENDER_DATA in older format)
         "\"url_list\":[\"",
         "\"play_addr\":{\"url_list\":[\"",
         "\"download_addr\":{\"url_list\":[\"",
@@ -542,4 +543,3 @@ pub fn run() {
         .expect("error while running tauri application");
 
 }
-

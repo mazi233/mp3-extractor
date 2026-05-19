@@ -23,9 +23,44 @@ body {
 }
 
 h1 {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 600;
   color: #fff;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  background: #1a1a1a;
+  border-radius: 10px;
+  padding: 4px;
+  width: 100%;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 8px 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #888;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.tab-btn.active {
+  background: #6c5ce7;
+  color: #fff;
+}
+
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
 }
 
 .input-section {
@@ -90,6 +125,26 @@ h1 {
   white-space: nowrap;
 }
 
+.file-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-pick-row .primary-btn {
+  width: auto;
+  padding: 8px 16px;
+}
+
+.file-path {
+  font-size: 12px;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
 .primary-btn {
   width: 100%;
   padding: 14px;
@@ -112,6 +167,38 @@ h1 {
   cursor: not-allowed;
 }
 
+
+.status-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.status-actions span {
+  font-size: 14px;
+  color: #4caf50;
+}
+
+.btn-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+.btn-row .primary-btn {
+  flex: 1;
+}
+
+.primary-btn.secondary {
+  background: #2a2a2a;
+  border: 1px solid #444;
+}
+
+.primary-btn.secondary:hover:not(:disabled) {
+  background: #3a3a3a;
+}
 .status {
   width: 100%;
   text-align: center;
